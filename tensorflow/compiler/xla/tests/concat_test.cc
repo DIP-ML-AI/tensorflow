@@ -57,6 +57,15 @@ XLA_TEST_F(ConcatTest, Concat_R1_With_Nothing) {
   ComputeAndCompareR1<float>(&builder, expected, {}, ErrorSpec(0.0001));
 }
 
+XLA_TEST_F(ConcatTest, Concat_R1_L0_With_Nothing) {
+  ComputationBuilder builder(client_, TestName());
+  auto a = builder.ConstantR1<float>({});
+  auto concatenated = builder.ConcatInDim({a}, 0);
+
+  std::vector<float> expected = {};
+  ComputeAndCompareR1<float>(&builder, expected, {}, ErrorSpec(0.0001));
+}
+
 // Show that we can't concatenate R0 with R0 because we can't name the dimension
 // to concatenate on.
 XLA_TEST_F(ConcatTest, CannotConcatR0WithR0) {
@@ -431,6 +440,39 @@ XLA_TEST_F(ConcatTest, ConcatSeveralR1S32s) {
   std::vector<int32> expected(10);
   std::iota(expected.begin(), expected.end(), 1);
   ComputeAndCompareR1<int32>(&builder, expected, {});
+}
+
+XLA_TEST_F(ConcatTest, ConcatR3WeirdDims) {
+  ComputationBuilder builder(client_, TestName());
+
+  Array3D<float> arr0(9, 17, 1);
+  arr0.Fill(1);
+
+  Array3D<float> arr1(9, 17, 256);
+  arr1.Fill(2);
+
+  Array3D<float> expected(9, 17, arr0.n3() + arr1.n3());
+  for (int64 i = 0; i < expected.n1(); ++i) {
+    for (int64 j = 0; j < expected.n2(); ++j) {
+      int64 kk = 0;
+      for (const Array3D<float>& arr : {arr0, arr1}) {
+        for (int64 k = 0; k < arr.n3(); ++k, ++kk) {
+          expected(i, j, kk) = arr(i, j, k);
+        }
+      }
+    }
+  }
+
+  ComputationDataHandle h0;
+  auto p0 = CreateR3Parameter<float>(arr0, /*parameter_number=*/0, "p0",
+                                     &builder, &h0);
+  ComputationDataHandle h1;
+  auto p1 = CreateR3Parameter<float>(arr1, /*parameter_number=*/1, "p1",
+                                     &builder, &h1);
+
+  auto concatenated = builder.ConcatInDim({h0, h1}, 2);
+
+  ComputeAndCompareR3<float>(&builder, expected, {p0.get(), p1.get()});
 }
 
 // Describes a binary rank-2 concatenation test.

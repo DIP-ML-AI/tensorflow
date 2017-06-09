@@ -84,10 +84,7 @@ class BufferAssignmentTest : public HloTestBase {
                                                         int64 alignment = 1) {
     return BufferAssigner::Run(
                module, MakeUnique<DependencyHloOrdering>(module),
-               [this](const LogicalBuffer& buffer) {
-                 return backend_->compiler()->ShapeSizeBytes(buffer.shape());
-               },
-               alignment)
+               backend_->compiler()->BufferSizeBytesFunction(), alignment)
         .ConsumeValueOrDie();
   }
 
@@ -562,15 +559,14 @@ TEST_F(BufferAssignmentTest, ExampleWhile) {
 
   // Check that buffer for each subshape of 'while_op' shares allocation with
   // corresponding buffer from while body computation at same index.
-  TF_CHECK_OK(ShapeUtil::ForEachSubshape(
+  ShapeUtil::ForEachSubshape(
       while_op->shape(),
       [this, &buffers, while_op, body_root](const Shape& /*subshape*/,
                                             const ShapeIndex& index) {
         auto while_op_allocation = GetAllocation(*buffers, while_op, index);
         auto body_root_allocation = GetAllocation(*buffers, body_root, index);
         EXPECT_EQ(while_op_allocation.index(), body_root_allocation.index());
-        return Status::OK();
-      }));
+      });
 
   // Log size information for inspection.
   LOG(INFO) << "LogicalBuffer count " << buffers->Allocations().size()
@@ -856,8 +852,7 @@ TEST_F(BufferAssignmentTest, EmbeddedComputationBuffers) {
   EXPECT_FALSE(map_root_alloc.maybe_live_out());
   EXPECT_TRUE(map_root_alloc.is_thread_local());
 
-  // Allocations for the call computation should not be thread-local and not
-  // live-out.
+  // Allocations for the call computation should not be thread-local.
   auto& call_param_alloc = GetTopLevelAllocation(*assignment, call_param);
   EXPECT_FALSE(call_param_alloc.is_entry_computation_parameter());
   EXPECT_FALSE(call_param_alloc.maybe_live_out());
@@ -865,7 +860,6 @@ TEST_F(BufferAssignmentTest, EmbeddedComputationBuffers) {
 
   auto& call_root_alloc = GetTopLevelAllocation(*assignment, call_root);
   EXPECT_FALSE(call_root_alloc.is_entry_computation_parameter());
-  EXPECT_FALSE(call_root_alloc.maybe_live_out());
   EXPECT_FALSE(call_root_alloc.is_thread_local());
 
   // Entry computation allocations can be marked liveout and
@@ -900,7 +894,7 @@ TEST_F(BufferAssignmentTest, TupleParameterAsOutput) {
 
   // Verify each buffer allocation is marked as an entry computation parameter
   // and is liveout.
-  TF_CHECK_OK(ShapeUtil::ForEachSubshape(
+  ShapeUtil::ForEachSubshape(
       tuple_param->shape(),
       [this, &assignment, tuple_param](const Shape& /*subshape*/,
                                        const ShapeIndex& index) {
@@ -908,8 +902,7 @@ TEST_F(BufferAssignmentTest, TupleParameterAsOutput) {
         EXPECT_TRUE(allocation.is_entry_computation_parameter());
         EXPECT_EQ(0, allocation.parameter_number());
         EXPECT_TRUE(allocation.maybe_live_out());
-        return Status::OK();
-      }));
+      });
 }
 
 TEST_F(BufferAssignmentTest, ElementOfNestedTupleParameterAsOutput) {
@@ -1403,10 +1396,13 @@ TEST_F(WhileBufferAssignmentTest, OneForwardBackwardWhileLoopSet) {
   RunCopyInsertion(module.get());
   auto assignment = RunBufferAssignment(module.get());
 
-  EXPECT_EQ(assignment->GetUniqueSlice(while0, {2}).ConsumeValueOrDie(),
+  // while0 and while1 buffers should be completely aligned.
+  EXPECT_EQ(assignment->GetUniqueSlice(while0, {0}).ConsumeValueOrDie(),
             assignment->GetUniqueSlice(while1, {0}).ConsumeValueOrDie());
   EXPECT_EQ(assignment->GetUniqueSlice(while0, {1}).ConsumeValueOrDie(),
             assignment->GetUniqueSlice(while1, {1}).ConsumeValueOrDie());
+  EXPECT_EQ(assignment->GetUniqueSlice(while0, {2}).ConsumeValueOrDie(),
+            assignment->GetUniqueSlice(while1, {2}).ConsumeValueOrDie());
 }
 
 TEST_F(BufferAssignmentTest, TwoCalls) {
@@ -1442,8 +1438,7 @@ TEST_F(BufferAssignmentTest, TwoCalls) {
     FlattenCallGraph flatten;
     TF_ASSIGN_OR_ASSERT_OK(bool result, flatten.Run(module.get()));
     EXPECT_TRUE(result);
-    TF_ASSIGN_OR_ASSERT_OK(std::unique_ptr<CallGraph> call_graph,
-                           CallGraph::Build(module.get()));
+    std::unique_ptr<CallGraph> call_graph = CallGraph::Build(module.get());
   }
 
   RunCopyInsertion(module.get());
