@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/dma_helper.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_util.h"
+#include "tensorflow/core/common_runtime/gpu/process_state.h"
 #include "tensorflow/core/distributed_runtime/rendezvous_mgr_interface.h"
 #include "tensorflow/core/distributed_runtime/session_mgr.h"
 #include "tensorflow/core/framework/rendezvous.h"
@@ -683,7 +684,6 @@ void RdmaTensorBuffer::SendNextItem() {
                          << " error message: " << status.error_message();
       size_t buffer_size = RdmaMessage::kMessageTotalBytes;
       size_t tensor_bytes = 0;
-      TensorProto proto;
       // Figures out which device the tensor is hosted on.
       Device* src_dev = nullptr;
       Status s = channel_->adapter_->worker_env_->device_mgr->LookupDevice(
@@ -703,87 +703,147 @@ void RdmaTensorBuffer::SendNextItem() {
       CHECK(s.ok()) << "dst device not found";
       AllocatorAttributes dst_alloc_attr;
       dst_alloc_attr.set_on_host(true);
+
+      bool can_memcpy = DataTypeCanUseMemcpy(in.dtype());
       // string tensor needs to be serialized
+      Tensor copy;
+      TensorProto proto;
       if (src_dev->tensorflow_gpu_device_info() &&
           (!send_args.alloc_attrs.on_host())) {
         CHECK(send_args.device_context)
-            << "send dev name: " << src_dev->name()
-            << " gpu_info: " << src_dev->tensorflow_gpu_device_info();
-        // "val" is on a GPU. Uses GPUUtil to fill the proto.
-        s = VerbsUtil::SetProtoFromGPUSync(
-            in, src_dev, send_args.device_context, &proto, is_dead);
-        CHECK(s.ok()) << "set proto from gpu sync";
+          << "send dev name: " << src_dev->name()
+          << " gpu_info: " << src_dev->tensorflow_gpu_device_info();
+
+        if (can_memcpy) {
+          AllocatorAttributes host_alloc_attrs;
+          host_alloc_attrs.set_gpu_compatible(true);
+          host_alloc_attrs.set_on_host(true);
+          Allocator* alloc = ProcessState::singleton()->GetCUDAHostAllocator(0);
+          copy = Tensor(alloc, in.dtype(), in.shape());
+          tensor_bytes = in.TotalBytes();
+          buffer_size += tensor_bytes;
+          GPUUtil::CopyGPUTensorToCPU(
+              src_dev, send_args.device_context, &in, &copy,
+              [this, copy, tensor_bytes, buffer_size, key, in, step_id,
+               key_with_step_id, is_dead](const Status& s) {
+                CHECK(s.ok()) << "copy tensor from gpu sync";
+                StringPiece copy_buf;
+                copy_buf = copy.tensor_data();
+                PostCopyOperations(true, buffer_size, tensor_bytes, key, in,
+                                   step_id, is_dead, key_with_step_id, &copy,
+                                   NULL, &copy_buf);
+              });
+        } else {
+          // "val" is on a GPU. No longer uses GPUUtil to fill the proto, use
+          // aync instead
+          GPUUtil::SetProtoFromGPU(
+              in, src_dev, send_args.device_context, &proto, is_dead,
+              [this, proto, buffer_size, key, in, step_id, key_with_step_id,
+               is_dead](const Status& s) mutable {
+                CHECK(s.ok()) << "copy proto from gpu sync";
+                auto tensor_bytes = proto.ByteSize();
+                buffer_size += tensor_bytes;
+                PostCopyOperations(false, buffer_size, tensor_bytes, key, in,
+                                   step_id, is_dead, key_with_step_id, NULL,
+                                   &proto, NULL);
+              });
+        }
       } else {
         // tensor is in CPU memory.
-        in.AsProtoTensorContent(&proto);
-      }
-      tensor_bytes = proto.ByteSize();
-      // maybe some margin for string tensor?
-      buffer_size += tensor_bytes;
-      // prepare message
-      RdmaMessage rm;
-      rm.name_size_ = key.size();
-      rm.name_ = key;
-      rm.tensor_shape_ = in.shape();
-      rm.data_type_ = in.dtype();
-      rm.step_id_ = step_id;
-      rm.is_dead_ = is_dead;
-      rm.tensor_bytes_ = tensor_bytes;
-      rm.buffer_size_ = buffer_size;
-      mu_.lock();
-      if (local_status_ == none ||
-          (buffer_size > size_ && local_status_ == idle &&
-           remote_status_ == idle)) {
-        if ((local_status_ != none) && (buffer_size > size_)) {
-          CHECK(rm.data_type_ == DT_STRING)
-              << "Only string tensor allows to change size";
-        }
-        CreateCPUBuffer(buffer_size, false);
-        mu_.unlock();
-        // put back the key since it is not sent;
-        EnqueueItem(key_with_step_id);
-        // ask the remote to create the same buffer
-        rm.type_ = RDMA_MESSAGE_BUFFER_REQUEST;
-        rm.remote_addr_ = reinterpret_cast<uint64_t>(buffer_);
-        rm.rkey_ = self_->rkey;
-        string message = RdmaMessage::CreateMessage(rm);
-        channel_->tx_message_buffer_->EnqueueItem(message);
-        channel_->tx_message_buffer_->SendNextItem();
-      } else if ((local_status_ == idle) && (remote_status_ == idle)) {
-        // both buffers are ready, send the tensor
-        local_status_ = busy;
-        remote_status_ = busy;
-        // local/remote_status_ won't be set back to idle
-        // unitl Write() is successful
-        mu_.unlock();
-        CHECK((buffer_size == size_ && rm.data_type_ != DT_STRING) ||
-              (buffer_size <= size_ && rm.data_type_ == DT_STRING))
-            << "tensor and buffer size do not agree!"
-            << " buffer_size = " << size_
-            << " requested tensor size = " << buffer_size << in.DebugString();
-        uint32_t imm_data = LookupBufferIndex(key);
-        rm.type_ = RDMA_MESSAGE_TENSOR_WRITE;
-        string message = RdmaMessage::CreateMessage(rm);
-        memcpy(buffer_, message.data(), message.size());
-        if (!is_dead) {
-          // copy the tensor buffer content
-          void* output =
-              static_cast<void*>(static_cast<char*>(buffer_) +
-                                 RdmaMessage::kTensorBufferStartIndex);
-          CHECK(tensor_bytes + RdmaMessage::kTensorBufferStartIndex <= size_);
-          proto.SerializeToArray(output, tensor_bytes);
+        StringPiece copy_buf;
+        if (can_memcpy) {
+          copy_buf = in.tensor_data();
+          tensor_bytes = in.TotalBytes();
         } else {
-          buffer_size = RdmaMessage::kMessageTotalBytes;
+          in.AsProtoTensorContent(&proto);
+          tensor_bytes = proto.ByteSize();
         }
-        Write(imm_data, buffer_size);
-      } else {
-        mu_.unlock();
-        // put back the key since it is not sent;
-        EnqueueItem(key_with_step_id);
+        buffer_size += tensor_bytes;
+        PostCopyOperations(can_memcpy, buffer_size, tensor_bytes, key, in,
+                           step_id, is_dead, key_with_step_id, &copy, &proto,
+                           &copy_buf);
       }
+      // maybe some margin for string tensor?
     };
+
     channel_->adapter_->worker_env_->rendezvous_mgr->RecvLocalAsync(step_id,
                                                                     parsed, cb);
+  }
+}
+
+void RdmaTensorBuffer::PostCopyOperations(
+    bool can_memcpy, size_t buffer_size, size_t tensor_bytes, const string& key,
+    const Tensor& in, int64 step_id, bool is_dead,
+    const string& key_with_step_id, const Tensor* copy,
+    const TensorProto* proto, const StringPiece* copy_buf) {
+  // prepare message
+  RdmaMessage rm;
+  rm.name_size_ = key.size();
+  rm.name_ = key;
+  rm.tensor_shape_ = in.shape();
+  rm.data_type_ = in.dtype();
+  rm.step_id_ = step_id;
+  rm.is_dead_ = is_dead;
+  rm.tensor_bytes_ = tensor_bytes;
+  rm.buffer_size_ = buffer_size;
+  mu_.lock();
+  if (local_status_ == none || (buffer_size > size_ && local_status_ == idle &&
+                                remote_status_ == idle)) {
+    if ((local_status_ != none) && (buffer_size > size_)) {
+      VLOG(2) << "Extend RDMA buffer from " << size_ << " to " << buffer_size;
+    }
+    CreateCPUBuffer(buffer_size, false);
+    mu_.unlock();
+    // put back the key since it is not sent;
+    EnqueueItem(key_with_step_id);
+    // ask the remote to create the same buffer
+    rm.type_ = RDMA_MESSAGE_BUFFER_REQUEST;
+    rm.remote_addr_ = reinterpret_cast<uint64_t>(buffer_);
+    rm.rkey_ = self_->rkey;
+    string message = RdmaMessage::CreateMessage(rm);
+    channel_->tx_message_buffer_->EnqueueItem(message);
+    channel_->tx_message_buffer_->SendNextItem();
+  } else if ((local_status_ == idle) && (remote_status_ == idle)) {
+    // both buffers are ready, send the tensor
+    local_status_ = busy;
+    remote_status_ = busy;
+    // local/remote_status_ won't be set back to idle
+    // unitl Write() is successful
+    mu_.unlock();
+    if (!((buffer_size == size_ && rm.data_type_ != DT_STRING) ||
+          (buffer_size <= size_ && rm.data_type_ == DT_STRING))) {
+      VLOG(2) << "Tensor and buffer size do not agree,"
+              << " buffer_size = " << size_
+              << " requested tensor size = " << buffer_size << in.DebugString();
+    }
+    uint32_t imm_data = LookupBufferIndex(key);
+    rm.type_ = RDMA_MESSAGE_TENSOR_WRITE;
+    string message = RdmaMessage::CreateMessage(rm);
+    memcpy(buffer_, message.data(), message.size());
+    if (!is_dead) {
+      // copy the tensor buffer content
+      void* output = static_cast<void*>(static_cast<char*>(buffer_) +
+                                        RdmaMessage::kTensorBufferStartIndex);
+      CHECK(tensor_bytes + RdmaMessage::kTensorBufferStartIndex <= size_);
+      if (can_memcpy) {
+        CHECK(copy != NULL) << "callback missing pointer to copy tensor";
+        CHECK(copy_buf != NULL) << "callback missing pointer to copy buffer";
+        CHECK(copy_buf->size() == tensor_bytes)
+            << "unexpected tensor size: " << copy_buf->size()
+            << " != " << tensor_bytes;
+        memcpy(output, copy_buf->data(), tensor_bytes);
+      } else {
+        CHECK(proto != NULL) << "callback missing pointer to proto tensor";
+        proto->SerializeToArray(output, tensor_bytes);
+      }
+    } else {
+      buffer_size = RdmaMessage::kMessageTotalBytes;
+    }
+    Write(imm_data, buffer_size);
+  } else {
+    mu_.unlock();
+    // put back the key since it is not sent;
+    EnqueueItem(key_with_step_id);
   }
 }
 

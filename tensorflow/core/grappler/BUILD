@@ -38,6 +38,7 @@ cc_library(
 
 cc_test(
     name = "utils_test",
+    size = "small",
     srcs = ["utils_test.cc"],
     deps = [
         ":utils",
@@ -90,6 +91,7 @@ cc_library(
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
+        "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/grappler/inputs:utils",
@@ -98,6 +100,7 @@ cc_library(
 
 cc_test(
     name = "grappler_item_test",
+    size = "small",
     srcs = ["grappler_item_test.cc"],
     deps = [
         ":grappler_item",
@@ -110,6 +113,7 @@ cc_test(
 
 cc_test(
     name = "grappler_item_builder_test",
+    size = "small",
     srcs = ["grappler_item_builder_test.cc"],
     deps = [
         ":grappler_item_builder",
@@ -118,6 +122,7 @@ cc_test(
         "//tensorflow/cc:grad_testutil",
         "//tensorflow/cc:gradients",
         "//tensorflow/core:framework",
+        "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",

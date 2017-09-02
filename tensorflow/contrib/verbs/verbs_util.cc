@@ -20,21 +20,6 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/str_util.h"
 namespace tensorflow {
 
-// static sync wrapper:
-Status VerbsUtil::SetProtoFromGPUSync(const Tensor& tensor, Device* dev,
-                                      const DeviceContext* device_context,
-                                      TensorProto* proto, bool is_dead) {
-  Notification n;
-  Status status;
-  GPUUtil::SetProtoFromGPU(tensor, dev, device_context, proto, is_dead,
-                           [&n, &status](const Status& s) {
-                             status = s;
-                             n.Notify();
-                           });
-  n.WaitForNotification();
-  return status;
-}
-
 // static
 string VerbsUtil::AppendStepidToKey(const string& key, int64 step_id) {
   return strings::StrCat(key, ";", step_id);

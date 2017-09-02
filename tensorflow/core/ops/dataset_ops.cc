@@ -75,6 +75,17 @@ REGISTER_OP("ZipDataset")
 Creates a dataset that zips together `input_datasets`.
 )doc");
 
+REGISTER_OP("ConcatenateDataset")
+    .Input("input_dataset: resource")
+    .Input("another_dataset: resource")
+    .Output("handle: resource")
+    .Attr("output_types: list(type) >= 1")
+    .Attr("output_shapes: list(shape) >= 1")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .Doc(R"doc(
+Creates a dataset that concatenates `input_dataset` with `another_dataset`.
+)doc");
+
 REGISTER_OP("RepeatDataset")
     .Input("input_dataset: resource")
     .Input("count: int64")
@@ -119,6 +130,16 @@ count: A scalar representing the number of elements from the `input_dataset`
   that should be skipped.  If count is -1, skips everything.
 )doc");
 
+REGISTER_OP("IgnoreErrorsDataset")
+    .Input("input_dataset: resource")
+    .Output("handle: resource")
+    .Attr("output_types: list(type) >= 1")
+    .Attr("output_shapes: list(shape) >= 1")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .Doc(R"doc(
+Creates a dataset that contains the elements of `input_dataset` ignoring errors.
+)doc");
+
 REGISTER_OP("MapDataset")
     .Input("input_dataset: resource")
     .Input("other_arguments: Targuments")
@@ -135,8 +156,7 @@ Creates a dataset that applies `f` to the outputs of `input_dataset`.
 REGISTER_OP("ParallelMapDataset")
     .Input("input_dataset: resource")
     .Input("other_arguments: Targuments")
-    .Input("num_threads: int32")
-    .Input("output_buffer_size: int64")
+    .Input("num_parallel_calls: int32")
     .Output("handle: resource")
     .Attr("f: func")
     .Attr("Targuments: list(type) >= 0")
@@ -146,14 +166,25 @@ REGISTER_OP("ParallelMapDataset")
     .Doc(R"doc(
 Creates a dataset that applies `f` to the outputs of `input_dataset`.
 
-Unlike a "MapDataset", which applies `f` sequentially, this dataset uses
-up to `num_threads` threads to process elements from `input_dataset`
-in parallel.
+Unlike a "MapDataset", which applies `f` sequentially, this dataset invokes up
+to `num_parallel_calls` copies of `f` in parallel.
 
-num_threads: The number of threads to use to process elements from
-  `input_dataset`.
-output_buffer_size: The maximum number of output elements to buffer in an
-  iterator over this dataset.
+num_parallel_calls: The number of concurrent invocations of `f` that process
+  elements from `input_dataset` in parallel.
+)doc");
+
+REGISTER_OP("PrefetchDataset")
+    .Input("input_dataset: resource")
+    .Input("buffer_size: int64")
+    .Output("handle: resource")
+    .Attr("output_types: list(type) >= 1")
+    .Attr("output_shapes: list(shape) >= 1")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .Doc(R"doc(
+Creates a dataset that asynchronously prefetches elements from `input_dataset`.
+
+buffer_size: The maximum number of elements to buffer in an iterator over
+  this dataset.
 )doc");
 
 REGISTER_OP("FlatMapDataset")
@@ -171,6 +202,31 @@ Creates a dataset that applies `f` to the outputs of `input_dataset`.
 Unlike MapDataset, the `f` in FlatMapDataset is expected to return a
 Dataset resource, and FlatMapDataset will flatten successive results
 into a single Dataset.
+
+f: A function mapping elements of `input_dataset`, concatenated with
+  `other_arguments`, to a Dataset resource that contains elements matching
+  `output_types` and `output_shapes`.
+)doc");
+
+REGISTER_OP("InterleaveDataset")
+    .Input("input_dataset: resource")
+    .Input("other_arguments: Targuments")
+    .Input("cycle_length: int64")
+    .Input("block_length: int64")
+    .Output("handle: resource")
+    .Attr("f: func")
+    .Attr("Targuments: list(type) >= 0")
+    .Attr("output_types: list(type) >= 1")
+    .Attr("output_shapes: list(shape) >= 1")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .Doc(R"doc(
+Creates a dataset that applies `f` to the outputs of `input_dataset`.
+
+Unlike MapDataset, the `f` in InterleaveDataset is expected to return
+a Dataset resource, and InterleaveDataset will flatten successive
+results into a single Dataset. Unlike FlatMapDataset,
+InterleaveDataset will interleave sequences of up to `block_length`
+consecutive elements from `cycle_length` input elements.
 
 f: A function mapping elements of `input_dataset`, concatenated with
   `other_arguments`, to a Dataset resource that contains elements matching
@@ -326,8 +382,29 @@ seed: A scalar seed for the random number generator. If either seed or
 seed2: A second scalar seed to avoid seed collision.
 )doc");
 
+REGISTER_OP("CacheDataset")
+    .Input("input_dataset: resource")
+    .Input("filename: string")
+    .Output("handle: resource")
+    .Attr("output_types: list(type) >= 1")
+    .Attr("output_shapes: list(shape) >= 1")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .Doc(R"doc(
+Creates a dataset that caches elements from `input_dataset`.
+
+A CacheDataset will iterate over the input_dataset, and store tensors. If the
+cache already exists, the cache will be used. If the cache is inappropriate
+(e.g. cannot be opened, contains tensors of the wrong shape / size), an error
+will the returned when used.
+
+filename: A path on the filesystem where we should cache the dataset. Note: this
+  will be a directory.
+)doc");
+
 REGISTER_OP("TextLineDataset")
     .Input("filenames: string")
+    .Input("compression_type: string")
+    .Input("buffer_size: int64")
     .Output("handle: resource")
     .SetShapeFn(shape_inference::ScalarShape)  // TODO(mrry): validate
                                                // that `filenames` is
@@ -338,6 +415,25 @@ Creates a dataset that emits the lines of one or more text files.
 
 filenames: A scalar or a vector containing the name(s) of the file(s) to be
   read.
+compression_type: A scalar containing either (i) the empty string (no
+  compression), (ii) "ZLIB", or (iii) "GZIP".
+buffer_size: A scalar containing the number of bytes to buffer.
+)doc");
+
+REGISTER_OP("SqlDataset")
+    .Input("driver_name: string")
+    .Input("data_source_name: string")
+    .Input("query: string")
+    .Output("handle: resource")
+    .Attr("output_types: list(type) >= 1")
+    .Attr("output_shapes: list(shape) >= 1")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .Doc(R"doc(
+Creates a dataset that executes a SQL query and emits rows of the result set.
+
+driver_name: The database type. Currently, the only supported type is 'sqlite'.
+data_source_name: A connection string to connect to the database.
+query: A SQL query to execute.
 )doc");
 
 REGISTER_OP("FixedLengthRecordDataset")
@@ -345,6 +441,7 @@ REGISTER_OP("FixedLengthRecordDataset")
     .Input("header_bytes: int64")
     .Input("record_bytes: int64")
     .Input("footer_bytes: int64")
+    .Input("buffer_size: int64")
     .Output("handle: resource")
     .SetShapeFn(shape_inference::ScalarShape)
     .Doc(R"doc(
@@ -357,11 +454,13 @@ header_bytes: A scalar representing the number of bytes to skip at the
 record_bytes: A scalar representing the number of bytes in each record.
 footer_bytes: A scalar representing the number of bytes to skip at the end
   of a file.
+buffer_size: A scalar representing the number of bytes to buffer. Must be > 0.
 )doc");
 
 REGISTER_OP("TFRecordDataset")
     .Input("filenames: string")
     .Input("compression_type: string")
+    .Input("buffer_size: int64")
     .Output("handle: resource")
     .SetShapeFn(shape_inference::ScalarShape)
     .Doc(R"doc(
@@ -371,6 +470,8 @@ filenames: A scalar or vector containing the name(s) of the file(s) to be
   read.
 compression_type: A scalar containing either (i) the empty string (no
   compression), (ii) "ZLIB", or (iii) "GZIP".
+buffer_size: A scalar representing the number of bytes to buffer. A value of
+  0 means no buffering will be performed.
 )doc");
 
 REGISTER_OP("Iterator")
@@ -396,6 +497,24 @@ Makes a new iterator from the given `dataset` and stores it in `iterator`.
 
 This operation may be executed multiple times. Each execution will reset the
 iterator in `iterator` to the first element of `dataset`.
+)doc");
+
+REGISTER_OP("SaveIterator")
+    .Input("iterator: resource")
+    .Input("path: string")
+    .SetShapeFn(shape_inference::NoOutputs)
+    .Doc(R"doc(
+Saves the state of the `iterator` at `path`.
+
+This state can be restored using "RestoreIterator".
+)doc");
+
+REGISTER_OP("RestoreIterator")
+    .Input("iterator: resource")
+    .Input("path: string")
+    .SetShapeFn(shape_inference::NoOutputs)
+    .Doc(R"doc(
+Restores the state of the `iterator` from the checkpoint saved at `path` using "SaveIterator".
 )doc");
 
 REGISTER_OP("OneShotIterator")
@@ -466,6 +585,34 @@ REGISTER_OP("IteratorDispose")
     .SetShapeFn(shape_inference::NoOutputs)
     .Doc(R"doc(
 Releases any resources used by the given iterator.
+)doc");
+
+REGISTER_OP("IteratorToStringHandle")
+    .Input("resource_handle: resource")
+    .Output("string_handle: string")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .Doc(R"doc(
+Converts the given `resource_handle` representing an iterator to a string.
+
+resource_handle: A handle to an iterator resource.
+string_handle: A string representation of the given handle.
+)doc");
+
+REGISTER_OP("IteratorFromStringHandle")
+    .Input("string_handle: string")
+    .Output("resource_handle: resource")
+    .Attr("output_types: list(type) >= 0 = []")
+    .Attr("output_shapes: list(shape) >= 0 = []")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .Doc(R"doc(
+Converts the given string representing a handle to an iterator to a resource.
+
+string_handle: A string representation of the given handle.
+resource_handle: A handle to an iterator resource.
+output_types: If specified, defines the type of each tuple component in an
+  element produced by the resulting iterator.
+output_shapes: If specified, defines the shape of each tuple component in an
+  element produced by the resulting iterator.
 )doc");
 
 }  // namespace tensorflow

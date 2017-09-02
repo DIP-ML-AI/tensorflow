@@ -21,6 +21,7 @@ from __future__ import print_function
 import collections
 import functools
 
+from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -152,9 +153,13 @@ class InitializableLookupTableBase(LookupInterface):
       default_value: The value to use if a key is missing in the table.
       initializer: The table initializer to use.
     """
+    if context.in_graph_mode():
+      name = table_ref.op.name.split("/")[-1]
+    else:
+      name = context.context().scope_name
     super(InitializableLookupTableBase,
           self).__init__(initializer.key_dtype, initializer.value_dtype,
-                         table_ref.op.name.split("/")[-1])
+                         name)
     self._table_ref = table_ref
     self._default_value = ops.convert_to_tensor(
         default_value, dtype=self._value_dtype)
@@ -236,11 +241,11 @@ class HashTable(InitializableLookupTableBase):
   Example usage:
 
   ```python
-  table = tf.contrib.lookup.HashTable(
-      tf.contrib.lookup.KeyValueTensorInitializer(keys, values), -1)
-  out = table.lookup(input_tensor).
+  table = tf.HashTable(
+      tf.KeyValueTensorInitializer(keys, values), -1)
+  out = table.lookup(input_tensor)
   table.init.run()
-  print out.eval()
+  print(out.eval())
   ```
   """
 
@@ -691,8 +696,8 @@ class IdTableWithHashBuckets(LookupInterface):
   - emerson -> 0
   - lake -> 1
   - palmer -> 2
-  - <other term> -> bucket id between 3 and 3 + num_oov_buckets, calculated by:
-    hash(<term>) % num_oov_buckets + vocab_size
+  - <other term> -> bucket id between 3 and 3 + num_oov_buckets - 1, calculated
+    by: hash(<term>) % num_oov_buckets + vocab_size
 
   If input_tensor is ["emerson", "lake", "palmer", "king", "crimson"],
   the lookup result is [0, 1, 2, 4, 7]
@@ -709,7 +714,7 @@ class IdTableWithHashBuckets(LookupInterface):
       num_oov_buckets)
   out = table.lookup(input_tensor).
   table.init.run()
-  print out.eval()
+  print(out.eval())
   ```
 
   The hash function used for generating out-of-vocabulary buckets ID is handled
@@ -870,7 +875,8 @@ def index_table_from_file(vocabulary_file=None,
   Any lookup of an out-of-vocabulary token will return a bucket ID based on its
   hash if `num_oov_buckets` is greater than zero. Otherwise it is assigned the
   `default_value`.
-  The bucket ID range is `[vocabulary size, vocabulary size + num_oov_buckets]`.
+  The bucket ID range is
+  `[vocabulary size, vocabulary size + num_oov_buckets - 1]`.
 
   The underlying table must be initialized by calling
   `tf.tables_initializer.run()` or `table.init.run()` once.
@@ -977,7 +983,7 @@ def index_table_from_tensor(vocabulary_list,
   Any lookup of an out-of-vocabulary token will return a bucket ID based on its
   hash if `num_oov_buckets` is greater than zero. Otherwise it is assigned the
   `default_value`.
-  The bucket ID range is `[mapping size, mapping size + num_oov_buckets]`.
+  The bucket ID range is `[mapping size, mapping size + num_oov_buckets - 1]`.
 
   The underlying table must be initialized by calling
   `tf.tables_initializer.run()` or `table.init.run()` once.
@@ -988,9 +994,9 @@ def index_table_from_tensor(vocabulary_list,
   Sample Usages:
 
   ```python
-  vocabulary_list = t.constant(["emerson", "lake", "palmer")
+  vocabulary_list = tf.constant(["emerson", "lake", "palmer"])
   table = tf.contrib.lookup.index_table_from_tensor(
-      vocabulary_list=vocabulary_list, num_oov_buckets=1, default_value=-1)
+      mapping=vocabulary_list, num_oov_buckets=1, default_value=-1)
   features = tf.constant(["emerson", "lake", "and", "palmer"])
   ids = table.lookup(features)
   ...
@@ -1160,7 +1166,7 @@ def index_to_string_table_from_tensor(vocabulary_list,
   Sample Usages:
 
   ```python
-  vocabulary_list = t.constant(["emerson", "lake", "palmer")
+  vocabulary_list = tf.constant(["emerson", "lake", "palmer"])
   indices = tf.constant([1, 5], tf.int64)
   table = tf.contrib.lookup.index_to_string_table_from_tensor(
       vocabulary_list, default_value="UNKNOWN")

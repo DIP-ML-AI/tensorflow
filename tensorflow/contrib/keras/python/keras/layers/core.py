@@ -33,9 +33,9 @@ from tensorflow.contrib.keras.python.keras.engine import Layer
 from tensorflow.contrib.keras.python.keras.utils.generic_utils import deserialize_keras_object
 from tensorflow.contrib.keras.python.keras.utils.generic_utils import func_dump
 from tensorflow.contrib.keras.python.keras.utils.generic_utils import func_load
+from tensorflow.contrib.keras.python.keras.utils.generic_utils import has_arg
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.layers import core as tf_core_layers
-from tensorflow.python.util import tf_inspect
 
 
 class Masking(Layer):
@@ -77,7 +77,7 @@ class Masking(Layer):
   def call(self, inputs):
     boolean_mask = K.any(
         K.not_equal(inputs, self.mask_value), axis=-1, keepdims=True)
-    return inputs * K.cast(boolean_mask, K.floatx())
+    return inputs * K.cast(boolean_mask, inputs.dtype)
 
   def get_config(self):
     config = {'mask_value': self.mask_value}
@@ -107,7 +107,10 @@ class Dropout(tf_core_layers.Dropout, Layer):
     self.supports_masking = True
     # Inheritance call order:
     # 1) tf.layers.Dropout, 2) keras.layers.Layer, 3) tf.layers.Layer
-    super(Dropout, self).__init__(**kwargs)
+    super(Dropout, self).__init__(rate=rate,
+                                  noise_shape=noise_shape,
+                                  seed=seed,
+                                  **kwargs)
 
   def call(self, inputs, training=None):
     if training is None:
@@ -207,12 +210,9 @@ class SpatialDropout2D(Dropout):
   def _get_noise_shape(self, inputs):
     input_shape = K.shape(inputs)
     if self.data_format == 'channels_first':
-      noise_shape = (input_shape[0], input_shape[1], 1, 1)
+      return (input_shape[0], input_shape[1], 1, 1)
     elif self.data_format == 'channels_last':
-      noise_shape = (input_shape[0], 1, 1, input_shape[3])
-    else:
-      raise ValueError('Invalid data_format:', self.data_format)
-    return noise_shape
+      return (input_shape[0], 1, 1, input_shape[3])
 
 
 class SpatialDropout3D(Dropout):
@@ -262,12 +262,9 @@ class SpatialDropout3D(Dropout):
   def _get_noise_shape(self, inputs):
     input_shape = K.shape(inputs)
     if self.data_format == 'channels_first':
-      noise_shape = (input_shape[0], input_shape[1], 1, 1, 1)
+      return (input_shape[0], input_shape[1], 1, 1, 1)
     elif self.data_format == 'channels_last':
-      noise_shape = (input_shape[0], 1, 1, 1, input_shape[4])
-    else:
-      raise ValueError('Invalid data_format:', self.data_format)
-    return noise_shape
+      return (input_shape[0], 1, 1, 1, input_shape[4])
 
 
 class Activation(Layer):
@@ -355,7 +352,7 @@ class Reshape(Layer):
         The new output shape with a -1 replaced with its computed value.
 
         Raises a ValueError if the total array size of the output_shape is
-        different then the input_shape, or more then one unknown dimension
+        different then the input_shape, or more than one unknown dimension
         is specified.
 
     Raises:
@@ -590,8 +587,7 @@ class Lambda(Layer):
 
   def call(self, inputs, mask=None):
     arguments = self.arguments
-    arg_spec = tf_inspect.getargspec(self.function)
-    if 'mask' in arg_spec.args:
+    if has_arg(self.function, 'mask'):
       arguments['mask'] = mask
     return self.function(inputs, **arguments)
 
@@ -633,6 +629,16 @@ class Lambda(Layer):
       function = func_load(config['function'], globs=globs)
     else:
       raise TypeError('Unknown function type:', function_type)
+
+    # If arguments were numpy array, they have been saved as
+    # list. We need to recover the ndarray
+    if 'arguments' in config:
+      for key in config['arguments']:
+        if isinstance(config['arguments'][key], dict):
+          arg_dict = config['arguments'][key]
+          if 'type' in arg_dict and arg_dict['type'] == 'ndarray':
+            # Overwrite the argument with its numpy translation
+            config['arguments'][key] = np.array(arg_dict['value'])
 
     config['function'] = function
     return cls(**config)
@@ -719,19 +725,10 @@ class Dense(tf_core_layers.Dense, Layer):
         kernel_regularizer=regularizers.get(kernel_regularizer),
         bias_regularizer=regularizers.get(bias_regularizer),
         activity_regularizer=regularizers.get(activity_regularizer),
+        kernel_constraint=constraints.get(kernel_constraint),
+        bias_constraint=constraints.get(bias_constraint),
         **kwargs)
-    # TODO(fchollet): move weight constraint support to core layers.
-    self.kernel_constraint = constraints.get(kernel_constraint)
-    self.bias_constraint = constraints.get(bias_constraint)
     self.supports_masking = True
-
-  def build(self, input_shape):
-    super(Dense, self).build(input_shape)
-    # TODO(fchollet): move weight constraint support to core layers.
-    if self.kernel_constraint:
-      self.constraints[self.kernel] = self.kernel_constraint
-    if self.use_bias and self.bias_constraint:
-      self.constraints[self.bias] = self.bias_constraint
 
   def get_config(self):
     config = {

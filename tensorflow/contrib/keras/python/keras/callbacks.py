@@ -397,7 +397,7 @@ class ModelCheckpoint(Callback):
 
     if mode not in ['auto', 'min', 'max']:
       logging.warning('ModelCheckpoint mode %s is unknown, '
-                      'fallback to auto mode.' % (mode))
+                      'fallback to auto mode.' % mode)
       mode = 'auto'
 
     if mode == 'min':
@@ -486,7 +486,7 @@ class EarlyStopping(Callback):
 
     if mode not in ['auto', 'min', 'max']:
       logging.warning('EarlyStopping mode %s is unknown, '
-                      'fallback to auto mode.' % (self.mode))
+                      'fallback to auto mode.' % mode)
       mode = 'auto'
 
     if mode == 'min':
@@ -494,7 +494,7 @@ class EarlyStopping(Callback):
     elif mode == 'max':
       self.monitor_op = np.greater
     else:
-      if 'acc' in self.monitor or self.monitor.startswith('fmeasure'):
+      if 'acc' in self.monitor:
         self.monitor_op = np.greater
       else:
         self.monitor_op = np.less
@@ -513,8 +513,10 @@ class EarlyStopping(Callback):
   def on_epoch_end(self, epoch, logs=None):
     current = logs.get(self.monitor)
     if current is None:
-      logging.warning('Early stopping requires %s available!' % (self.monitor))
-
+      logging.warning('Early stopping conditioned on metric `%s` '
+                      'which is not available. Available metrics are: %s' %
+                      (self.monitor, ','.join(list(logs.keys()))))
+      return
     if self.monitor_op(current - self.min_delta, self.best):
       self.best = current
       self.wait = 0
@@ -616,7 +618,7 @@ class TensorBoard(Callback):
   If you have installed TensorFlow with pip, you should be able
   to launch TensorBoard from the command line:
 
-  ```
+  ```sh
   tensorboard --logdir=/full_path_to_your_logs
   ```
 
@@ -680,10 +682,17 @@ class TensorBoard(Callback):
     if self.histogram_freq and self.merged is None:
       for layer in self.model.layers:
         for weight in layer.weights:
-          tf_summary.histogram(weight.name, weight)
+          mapped_weight_name = weight.name.replace(':', '_')
+          tf_summary.histogram(mapped_weight_name, weight)
           if self.write_grads:
             grads = model.optimizer.get_gradients(model.total_loss, weight)
-            tf_summary.histogram('{}_grad'.format(weight.name), grads)
+
+            def is_indexed_slices(grad):
+              return type(grad).__name__ == 'IndexedSlices'
+
+            grads = [grad.values if is_indexed_slices(grad) else grad
+                     for grad in grads]
+            tf_summary.histogram('{}_grad'.format(mapped_weight_name), grads)
           if self.write_images:
             w_img = array_ops.squeeze(weight)
             shape = K.int_shape(w_img)
@@ -708,7 +717,7 @@ class TensorBoard(Callback):
 
             shape = K.int_shape(w_img)
             assert len(shape) == 4 and shape[-1] in [1, 3, 4]
-            tf_summary.image(weight.name, w_img)
+            tf_summary.image(mapped_weight_name, w_img)
 
         if hasattr(layer, 'output'):
           tf_summary.histogram('{}_out'.format(layer.name), layer.output)
@@ -761,6 +770,9 @@ class TensorBoard(Callback):
   def on_epoch_end(self, epoch, logs=None):
     logs = logs or {}
 
+    if not self.validation_data and self.histogram_freq:
+      raise ValueError('If printing histograms, validation_data must be '
+                       'provided, and cannot be a generator.')
     if self.validation_data and self.histogram_freq:
       if epoch % self.histogram_freq == 0:
 
@@ -781,7 +793,11 @@ class TensorBoard(Callback):
           batch_val.append(val_data[1][i:i + step])
           batch_val.append(val_data[2][i:i + step])
           if self.model.uses_learning_phase:
-            batch_val.append(val_data[3])
+            # do not slice the learning phase
+            batch_val = [x[i:i + step] for x in val_data[:-1]]
+            batch_val.append(val_data[-1])
+          else:
+            batch_val = [x[i:i + step] for x in val_data]
           feed_dict = dict(zip(tensors, batch_val))
           result = self.sess.run([self.merged], feed_dict=feed_dict)
           summary_str = result[0]
@@ -896,8 +912,9 @@ class ReduceLROnPlateau(Callback):
     logs['lr'] = K.get_value(self.model.optimizer.lr)
     current = logs.get(self.monitor)
     if current is None:
-      logging.warning('Learning Rate Plateau Reducing requires %s available!' %
-                      self.monitor)
+      logging.warning('Reduce LR on plateau conditioned on metric `%s` '
+                      'which is not available. Available metrics are: %s' %
+                      (self.monitor, ','.join(list(logs.keys()))))
     else:
       if self.in_cooldown():
         self.cooldown_counter -= 1
@@ -974,6 +991,10 @@ class CSVLogger(Callback):
       else:
         return k
 
+    if self.model.stop_training:
+      # We set NA so that csv parsers do not fail for this last epoch.
+      logs = dict([(k, logs[k]) if k in logs else (k, 'NA') for k in self.keys])
+
     if not self.writer:
       self.keys = sorted(logs.keys())
 
@@ -998,7 +1019,7 @@ class CSVLogger(Callback):
 
 
 class LambdaCallback(Callback):
-  """Callback for creating simple, custom callbacks on-the-fly.
+  r"""Callback for creating simple, custom callbacks on-the-fly.
 
   This callback is constructed with anonymous functions that will be called
   at the appropriate time. Note that the callbacks expects positional
@@ -1020,17 +1041,21 @@ class LambdaCallback(Callback):
       on_train_end: called at the end of model training.
 
   Example:
+
       ```python
       # Print the batch number at the beginning of every batch.
       batch_print_callback = LambdaCallback(
           on_batch_begin=lambda batch,logs: print(batch))
 
-      # Plot the loss after every epoch.
-      import numpy as np
-      import matplotlib.pyplot as plt
-      plot_loss_callback = LambdaCallback(
-          on_epoch_end=lambda epoch, logs: plt.plot(np.arange(epoch),
-                                                    logs['loss']))
+      # Stream the epoch loss to a file in JSON format. The file content
+      # is not well-formed JSON but rather has a JSON object per line.
+      import json
+      json_log = open('loss_log.json', mode='wt', buffering=1)
+      json_logging_callback = LambdaCallback(
+          on_epoch_end=lambda epoch, logs: json_log.write(
+              json.dumps({'epoch': epoch, 'loss': logs['loss']}) + '\n'),
+          on_train_end=lambda logs: json_log.close()
+      )
 
       # Terminate some processes after having finished model training.
       processes = ...
@@ -1040,7 +1065,7 @@ class LambdaCallback(Callback):
 
       model.fit(...,
                 callbacks=[batch_print_callback,
-                           plot_loss_callback,
+                           json_logging_callback,
                            cleanup_callback])
       ```
   """

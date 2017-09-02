@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import marshal
+import os
 import sys
 import time
 import types as python_types
@@ -195,7 +196,11 @@ def func_dump(func):
   Returns:
       A tuple `(code, defaults, closure)`.
   """
-  code = marshal.dumps(func.__code__).decode('raw_unicode_escape')
+  if os.name == 'nt':
+    code = marshal.dumps(
+        func.__code__).replace(b'\\', b'/').decode('raw_unicode_escape')
+  else:
+    code = marshal.dumps(func.__code__).decode('raw_unicode_escape')
   defaults = func.__defaults__
   if func.__closure__:
     closure = tuple(c.cell_contents for c in func.__closure__)
@@ -225,6 +230,24 @@ def func_load(code, defaults=None, closure=None, globs=None):
     globs = globals()
   return python_types.FunctionType(
       code, globs, name=code.co_name, argdefs=defaults, closure=closure)
+
+
+def has_arg(fn, name, accept_all=False):
+  """Checks if a callable accepts a given keyword argument.
+
+  Arguments:
+      fn: Callable to inspect.
+      name: Check if `fn` can be called with `name` as a keyword argument.
+      accept_all: What to return if there is no parameter called `name`
+                  but the function accepts a `**kwargs` argument.
+
+  Returns:
+      bool, whether `fn` accepts a `name` keyword argument.
+  """
+  arg_spec = tf_inspect.getargspec(fn)
+  if accept_all and arg_spec.keywords is not None:
+    return True
+  return name in arg_spec.args
 
 
 class Progbar(object):
@@ -309,7 +332,7 @@ class Progbar(object):
       for k in self.unique_values:
         info += ' - %s:' % k
         if isinstance(self.sum_values[k], list):
-          avg = self.sum_values[k][0] / max(1, self.sum_values[k][1])
+          avg = np.mean(self.sum_values[k][0] / max(1, self.sum_values[k][1]))
           if abs(avg) > 1e-3:
             info += ' %.4f' % avg
           else:
@@ -332,7 +355,7 @@ class Progbar(object):
         info = '%ds' % (now - self.start)
         for k in self.unique_values:
           info += ' - %s:' % k
-          avg = self.sum_values[k][0] / max(1, self.sum_values[k][1])
+          avg = np.mean(self.sum_values[k][0] / max(1, self.sum_values[k][1]))
           if avg > 1e-3:
             info += ' %.4f' % avg
           else:
